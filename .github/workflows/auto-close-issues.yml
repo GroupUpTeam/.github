@@ -1,47 +1,66 @@
-name: Org-wide Close Issues From Commit
+name: Close Issues From Commit
+
 on:
   push:
+
 permissions:
+  # 依然需要 issues: write 來關閉 issue
   issues: write
+  # contents: read 是為了讀取 commit 內容
   contents: read
+
 jobs:
-  close-issue-from-commit:
+  close-issues-from-commit:
     runs-on: ubuntu-latest
     steps:
-      - name: Close issues based on commit message
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const keywords = ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved'];
-            const issueRegex = new RegExp(`\\b(?:${keywords.join('|')})\\s+#(\\d+)`, 'gi');
-            const commits = github.context.payload.commits;
-            if (!commits) {
-              return;
-            }
-            for (const commit of commits) {
-              const matches = commit.message.matchAll(issueRegex);
-              if (!matches) continue;
-              for (const match of matches) {
-                const issueNumber = parseInt(match[1], 10);
-                if (isNaN(issueNumber)) continue;
-                console.log(`Found keyword to close issue #${issueNumber} in commit ${commit.id.substring(0, 7)}.`);
-                try {
-                  await github.rest.issues.update({
-                    owner: github.context.repo.owner,
-                    repo: github.context.repo.repo,
-                    issue_number: issueNumber,
-                    state: 'closed'
-                  });
-                  const commentBody = `此問題已在提交 [${commit.id.substring(0, 7)}](${commit.url}) 中被自動關閉。`;
-                  await github.rest.issues.createComment({
-                    owner: github.context.repo.owner,
-                    repo: github.context.repo.repo,
-                    issue_number: issueNumber,
-                    body: commentBody
-                  });
-                } catch (error) {
-                  console.error(`Failed to close or comment on issue #${issueNumber}. Error: ${error.message}`);
-                }
-              }
-            }
+      - name: Close issues based on commit message using GitHub CLI
+        # 直接使用 run 指令，不再使用 uses: ...
+        run: |
+          # 關鍵字陣列
+          KEYWORDS=('close' 'closes' 'closed' 'fix' 'fixes' 'fixed' 'resolve' 'resolves' 'resolved')
+          
+          # 將 github context 的 JSON 傳遞給 jq 工具進行解析
+          # 我們從中提取所有 commit 的訊息 (message)
+          MESSAGES=$(echo '${{ toJSON(github.event.commits) }}' | jq -r '.[].message')
+
+          # 建立一個陣列來存放所有找到的 issue 編號，避免重複關閉
+          declare -A ISSUES_TO_CLOSE
+
+          # 遍歷每一條 commit message
+          while read -r message; do
+            # 遍歷每一個關鍵字
+            for keyword in "${KEYWORDS[@]}"; do
+              # 使用 grep 和正規表示式來尋找 "keyword #123" 這種格式
+              # -o 選項只輸出匹配到的部分，-i 不分大小寫
+              FOUND_ISSUES=$(echo "$message" | grep -ioE "$keyword #\d+" || true)
+              if [[ -n "$FOUND_ED_ISSUES" ]]; then
+                # 從 "keyword #123" 中提取出數字 "123"
+                ISSUE_NUMS=$(echo "$FOUND_ISSUES" | grep -oE '#\d+' | tr -d '#')
+                while read -r num; do
+                  # 將找到的 issue 編號加入待處理陣列
+                  ISSUES_TO_CLOSE[$num]=1
+                done <<< "$ISSUE_NUMS"
+              fi
+            done
+          done <<< "$MESSAGES"
+
+          # 檢查是否有需要關閉的 issue
+          if [ ${#ISSUES_TO_CLOSE[@]} -eq 0 ]; then
+            echo "No issues to close."
+            exit 0
+          fi
+
+          echo "Found issues to close: ${!ISSUES_TO_CLOSE[@]}"
+
+          # 遍歷所有待處理的 issue 編號並執行關閉
+          for issue in "${!ISSUES_TO_CLOSE[@]}"; do
+            echo "Closing issue #$issue..."
+            # 使用 GitHub CLI 關閉 issue
+            gh issue close "$issue"
+            # (可選) 使用 GitHub CLI 加上註解
+            gh issue comment "$issue" --body "此問題已在此次推送中被自動關閉。"
+            echo "Successfully closed and commented on issue #$issue."
+          done
+        # 將 GITHUB_TOKEN 作為環境變數傳遞給 gh 指令，讓它可以進行認證
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
