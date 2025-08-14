@@ -16,13 +16,20 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // GitHub 官方支援的關鍵字
             const keywords = [
               'close', 'closes', 'closed',
               'fix', 'fixes', 'fixed',
               'resolve', 'resolves', 'resolved'
             ];
-            // 支援 "fixes: #123" / "resolve - #456" / "closed #789"
-            const issueRegex = new RegExp(`\\b(?:${keywords.join('|')})[:\\s-]*#(\\d+)`, 'gi');
+
+            // 支援 owner/repo#123 或 #123
+            // 例如：fixes #1, closes owner/repo#22 and resolves #333
+            const issueRegex = new RegExp(
+              `\\b(?:${keywords.join('|')})[:\\s-]*` + // 關鍵字 + 可選符號
+              `(?:([\\w.-]+)\\/([\\w.-]+))?#(\\d+)`, // 可選 owner/repo + issue 號碼
+              'gi'
+            );
 
             const commits = context.payload.commits;
             if (!Array.isArray(commits) || commits.length === 0) {
@@ -30,56 +37,56 @@ jobs:
               return;
             }
 
-            const toClose = new Set();
+            // 儲存要關閉的 issue
+            const issuesToClose = new Set();
 
             for (const commit of commits) {
+              console.log(`Checking commit: ${commit.id} - ${commit.message}`);
               const matches = commit.message.matchAll(issueRegex);
               for (const match of matches) {
-                const issueNumber = parseInt(match[1], 10);
+                const owner = match[1] || context.repo.owner;
+                const repo = match[2] || context.repo.repo;
+                const issueNumber = parseInt(match[3], 10);
                 if (!isNaN(issueNumber)) {
-                  toClose.add(issueNumber);
-                  console.log(`Found reference to issue #${issueNumber} in commit ${commit.id}`);
+                  issuesToClose.add(JSON.stringify({ owner, repo, issueNumber, commitId: commit.id, commitUrl: commit.url }));
                 }
               }
             }
 
-            if (toClose.size === 0) {
+            if (issuesToClose.size === 0) {
               console.log("No issues matched in commit messages.");
               return;
             }
 
-            for (const issueNumber of toClose) {
+            for (const issueData of issuesToClose) {
+              const { owner, repo, issueNumber, commitId, commitUrl } = JSON.parse(issueData);
               try {
-                // 先檢查是不是 PR
-                const issue = await github.rest.issues.get({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: issueNumber
-                });
+                // 確認是不是 PR
+                const issue = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
                 if (issue.data.pull_request) {
-                  console.log(`Skipping #${issueNumber} (it's a PR).`);
+                  console.log(`Skipping #${issueNumber} in ${owner}/${repo} (it's a PR).`);
                   continue;
                 }
 
                 // 關閉 issue
                 await github.rest.issues.update({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
+                  owner,
+                  repo,
                   issue_number: issueNumber,
                   state: 'closed'
                 });
 
                 // 留言通知
-                const commentBody = `此問題已在提交 [${issueNumber}](${issue.data.html_url}) 中被自動關閉。`;
+                const commentBody = `此問題已在提交 [${commitId.substring(0, 7)}](${commitUrl}) 中被自動關閉。`;
                 await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
+                  owner,
+                  repo,
                   issue_number: issueNumber,
                   body: commentBody
                 });
 
-                console.log(`Closed issue #${issueNumber} successfully.`);
+                console.log(`Closed issue #${issueNumber} in ${owner}/${repo} successfully.`);
               } catch (error) {
-                console.error(`Failed to process issue #${issueNumber}. Error: ${error.message}`);
+                console.error(`Failed to process issue #${issueNumber} in ${owner}/${repo}. Error: ${error.message}`);
               }
             }
