@@ -24,7 +24,7 @@ jobs:
             // 支援 "fixes: #123" / "resolve - #456" / "closed #789"
             const issueRegex = new RegExp(`\\b(?:${keywords.join('|')})[:\\s-]*#(\\d+)`, 'gi');
 
-            const commits = github.context.payload.commits;
+            const commits = context.payload.commits;
             if (!Array.isArray(commits) || commits.length === 0) {
               console.log("No commits found in push payload. Exiting.");
               return;
@@ -38,6 +38,7 @@ jobs:
                 const issueNumber = parseInt(match[1], 10);
                 if (!isNaN(issueNumber)) {
                   toClose.add(issueNumber);
+                  console.log(`Found reference to issue #${issueNumber} in commit ${commit.id}`);
                 }
               }
             }
@@ -51,8 +52,8 @@ jobs:
               try {
                 // 先檢查是不是 PR
                 const issue = await github.rest.issues.get({
-                  owner: github.context.repo.owner,
-                  repo: github.context.repo.repo,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
                   issue_number: issueNumber
                 });
                 if (issue.data.pull_request) {
@@ -62,17 +63,17 @@ jobs:
 
                 // 關閉 issue
                 await github.rest.issues.update({
-                  owner: github.context.repo.owner,
-                  repo: github.context.repo.repo,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
                   issue_number: issueNumber,
                   state: 'closed'
                 });
 
                 // 留言通知
-                const commentBody = `此問題已在提交 [${issue.data.number}](${issue.data.html_url}) 中被自動關閉。`;
+                const commentBody = `此問題已在提交 [${issueNumber}](${issue.data.html_url}) 中被自動關閉。`;
                 await github.rest.issues.createComment({
-                  owner: github.context.repo.owner,
-                  repo: github.context.repo.repo,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
                   issue_number: issueNumber,
                   body: commentBody
                 });
