@@ -1,66 +1,84 @@
-name: Close Issues From Commit
+name: Org-wide Default Auto Close Issues
 
 on:
   push:
 
 permissions:
-  # 依然需要 issues: write 來關閉 issue
   issues: write
-  # contents: read 是為了讀取 commit 內容
   contents: read
 
 jobs:
-  close-issues-from-commit:
+  close-issue-from-commit:
     runs-on: ubuntu-latest
     steps:
-      - name: Close issues based on commit message using GitHub CLI
-        # 直接使用 run 指令，不再使用 uses: ...
-        run: |
-          # 關鍵字陣列
-          KEYWORDS=('close' 'closes' 'closed' 'fix' 'fixes' 'fixed' 'resolve' 'resolves' 'resolved')
-          
-          # 將 github context 的 JSON 傳遞給 jq 工具進行解析
-          # 我們從中提取所有 commit 的訊息 (message)
-          MESSAGES=$(echo '${{ toJSON(github.event.commits) }}' | jq -r '.[].message')
+      - name: Close issues based on commit message
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const keywords = [
+              'close', 'closes', 'closed',
+              'fix', 'fixes', 'fixed',
+              'resolve', 'resolves', 'resolved'
+            ];
+            // 支援 "fixes: #123" / "resolve - #456" / "closed #789"
+            const issueRegex = new RegExp(`\\b(?:${keywords.join('|')})[:\\s-]*#(\\d+)`, 'gi');
 
-          # 建立一個陣列來存放所有找到的 issue 編號，避免重複關閉
-          declare -A ISSUES_TO_CLOSE
+            const commits = github.context.payload.commits;
+            if (!Array.isArray(commits) || commits.length === 0) {
+              console.log("No commits found in push payload. Exiting.");
+              return;
+            }
 
-          # 遍歷每一條 commit message
-          while read -r message; do
-            # 遍歷每一個關鍵字
-            for keyword in "${KEYWORDS[@]}"; do
-              # 使用 grep 和正規表示式來尋找 "keyword #123" 這種格式
-              # -o 選項只輸出匹配到的部分，-i 不分大小寫
-              FOUND_ISSUES=$(echo "$message" | grep -ioE "$keyword #\d+" || true)
-              if [[ -n "$FOUND_ED_ISSUES" ]]; then
-                # 從 "keyword #123" 中提取出數字 "123"
-                ISSUE_NUMS=$(echo "$FOUND_ISSUES" | grep -oE '#\d+' | tr -d '#')
-                while read -r num; do
-                  # 將找到的 issue 編號加入待處理陣列
-                  ISSUES_TO_CLOSE[$num]=1
-                done <<< "$ISSUE_NUMS"
-              fi
-            done
-          done <<< "$MESSAGES"
+            const toClose = new Set();
 
-          # 檢查是否有需要關閉的 issue
-          if [ ${#ISSUES_TO_CLOSE[@]} -eq 0 ]; then
-            echo "No issues to close."
-            exit 0
-          fi
+            for (const commit of commits) {
+              const matches = commit.message.matchAll(issueRegex);
+              for (const match of matches) {
+                const issueNumber = parseInt(match[1], 10);
+                if (!isNaN(issueNumber)) {
+                  toClose.add(issueNumber);
+                }
+              }
+            }
 
-          echo "Found issues to close: ${!ISSUES_TO_CLOSE[@]}"
+            if (toClose.size === 0) {
+              console.log("No issues matched in commit messages.");
+              return;
+            }
 
-          # 遍歷所有待處理的 issue 編號並執行關閉
-          for issue in "${!ISSUES_TO_CLOSE[@]}"; do
-            echo "Closing issue #$issue..."
-            # 使用 GitHub CLI 關閉 issue
-            gh issue close "$issue"
-            # (可選) 使用 GitHub CLI 加上註解
-            gh issue comment "$issue" --body "此問題已在此次推送中被自動關閉。"
-            echo "Successfully closed and commented on issue #$issue."
-          done
-        # 將 GITHUB_TOKEN 作為環境變數傳遞給 gh 指令，讓它可以進行認證
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            for (const issueNumber of toClose) {
+              try {
+                // 先檢查是不是 PR
+                const issue = await github.rest.issues.get({
+                  owner: github.context.repo.owner,
+                  repo: github.context.repo.repo,
+                  issue_number: issueNumber
+                });
+                if (issue.data.pull_request) {
+                  console.log(`Skipping #${issueNumber} (it's a PR).`);
+                  continue;
+                }
+
+                // 關閉 issue
+                await github.rest.issues.update({
+                  owner: github.context.repo.owner,
+                  repo: github.context.repo.repo,
+                  issue_number: issueNumber,
+                  state: 'closed'
+                });
+
+                // 留言通知
+                const commentBody = `此問題已在提交 [${issue.data.number}](${issue.data.html_url}) 中被自動關閉。`;
+                await github.rest.issues.createComment({
+                  owner: github.context.repo.owner,
+                  repo: github.context.repo.repo,
+                  issue_number: issueNumber,
+                  body: commentBody
+                });
+
+                console.log(`Closed issue #${issueNumber} successfully.`);
+              } catch (error) {
+                console.error(`Failed to process issue #${issueNumber}. Error: ${error.message}`);
+              }
+            }
