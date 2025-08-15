@@ -1,52 +1,59 @@
-name: Org-wide Default Auto Close Issues
+# 檔案路徑: .github/.github/workflows/central-issue-closer-final.yml
+
+name: Central Issue Closer (Final Version)
 
 on:
-  push:
+  workflow_dispatch:
+    inputs:
+      source_repo_full_name:
+        description: 'The full name of the repo where the event originated'
+        required: true
+      commits_json:
+        description: 'A JSON string of the commits array'
+        required: true
 
 permissions:
   issues: write
   contents: read
 
 jobs:
-  close-issue-from-commit:
+  close-issues-from-input:
     runs-on: ubuntu-latest
     steps:
-      - name: Close issues based on commit message
+      - name: Close issues based on provided commit data
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            // GitHub 官方支援的關鍵字
-            const keywords = [
-              'close', 'closes', 'closed',
-              'fix', 'fixes', 'fixed',
-              'resolve', 'resolves', 'resolved'
-            ];
+            const sourceRepoFullName = context.payload.inputs.source_repo_full_name;
+            const commits = JSON.parse(context.payload.inputs.commits_json);
+            const [fallbackOwner, fallbackRepo] = sourceRepoFullName.split('/');
+            
+            console.log(`Operating on event from repository: ${fallbackOwner}/${fallbackRepo}`);
 
-            // 支援 owner/repo#123 或 #123
-            // 例如：fixes #1, closes owner/repo#22 and resolves #333
+            const keywords = ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved'];
+            
             const issueRegex = new RegExp(
-              `\\b(?:${keywords.join('|')})[:\\s-]*` + // 關鍵字 + 可選符號
-              `(?:([\\w.-]+)\\/([\\w.-]+))?#(\\d+)`, // 可選 owner/repo + issue 號碼
+              `\\b(?:${keywords.join('|')})[:\\s-]*` + 
+              `(?:([\\w.-]+)\\/([\\w.-]+))?#(\\d+)`,
               'gi'
             );
 
-            const commits = context.payload.commits;
             if (!Array.isArray(commits) || commits.length === 0) {
-              console.log("No commits found in push payload. Exiting.");
+              console.log("No commits data provided. Exiting.");
               return;
             }
 
-            // 儲存要關閉的 issue
             const issuesToClose = new Set();
 
             for (const commit of commits) {
-              console.log(`Checking commit: ${commit.id} - ${commit.message}`);
+              console.log(`Checking commit: ${commit.id.substring(0,7)} - ${commit.message.split('\n')[0]}`);
               const matches = commit.message.matchAll(issueRegex);
               for (const match of matches) {
-                const owner = match[1] || context.repo.owner;
-                const repo = match[2] || context.repo.repo;
+                const owner = match[1] || fallbackOwner;
+                const repo = match[2] || fallbackRepo;
                 const issueNumber = parseInt(match[3], 10);
+
                 if (!isNaN(issueNumber)) {
                   issuesToClose.add(JSON.stringify({ owner, repo, issueNumber, commitId: commit.id, commitUrl: commit.url }));
                 }
@@ -61,30 +68,19 @@ jobs:
             for (const issueData of issuesToClose) {
               const { owner, repo, issueNumber, commitId, commitUrl } = JSON.parse(issueData);
               try {
-                // 確認是不是 PR
                 const issue = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
                 if (issue.data.pull_request) {
                   console.log(`Skipping #${issueNumber} in ${owner}/${repo} (it's a PR).`);
                   continue;
                 }
+                if (issue.data.state !== 'open') {
+                  console.log(`Skipping #${issueNumber} in ${owner}/${repo} (already closed).`);
+                  continue;
+                }
 
-                // 關閉 issue
-                await github.rest.issues.update({
-                  owner,
-                  repo,
-                  issue_number: issueNumber,
-                  state: 'closed'
-                });
-
-                // 留言通知
+                await github.rest.issues.update({ owner, repo, issue_number: issueNumber, state: 'closed' });
                 const commentBody = `此問題已在提交 [${commitId.substring(0, 7)}](${commitUrl}) 中被自動關閉。`;
-                await github.rest.issues.createComment({
-                  owner,
-                  repo,
-                  issue_number: issueNumber,
-                  body: commentBody
-                });
-
+                await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: commentBody });
                 console.log(`Closed issue #${issueNumber} in ${owner}/${repo} successfully.`);
               } catch (error) {
                 console.error(`Failed to process issue #${issueNumber} in ${owner}/${repo}. Error: ${error.message}`);
